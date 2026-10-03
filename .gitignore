@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+venv/
+env/
+dist/
+build/
+*.mp4
+*.wav
+models/
+
+# сборка: spec и иконка — часть проекта, их не игнорируем
+!captext_ai_pro.spec
+!AppIcon.icns
+!assets/AppIcon.png
+!assets/fonts/*

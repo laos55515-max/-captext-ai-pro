@@ -1,0 +1,26 @@
+# --- core runtime (required) ---
+PySide6>=6.6
+pydantic>=2.6
+numpy>=1.26
+librosa>=0.10           # BPM / onsets / spectral features (numpy fallback exists)
+
+# --- media decoding: at least one of these; both is best ---
+av>=12.0                # PyAV — correct PyPI name is `av`, NOT `pyav`. Bundles libav*,
+                        # used as the decoding fallback when no ffmpeg binary exists.
+static-ffmpeg>=2.5      # ships/downloads static ffmpeg+ffprobe binaries automatically
+# imageio-ffmpeg>=0.4.9 # alternative static ffmpeg provider (also auto-detected)
+
+# --- AI stack: распознавание вокала без галлюцинаций ---
+stable-ts>=2.17         # Stable-Whisper: Silero VAD, word timestamps, forced alignment
+faster-whisper>=1.0     # бэкенд/фолбэк для stable-ts (CTranslate2)
+demucs>=4.0             # HTDemucs: отделение вокала от минусовки ПЕРЕД Whisper
+torch>=2.2              # Demucs + MMS_FA
+torchaudio>=2.2         # CTC forced alignment (фолбэк для align)
+
+# --- optional quality boosters ---
+# onnxruntime>=1.17     # YAMNet embeddings for the ML classifier head
+# lightgbm>=4.0         # trained genre classifier head
+# spacy>=3.7            # POS tags for smarter line breaks (uk_core_news_sm / ru_core_news_sm)
+
+# --- dev ---
+pytest>=8.0

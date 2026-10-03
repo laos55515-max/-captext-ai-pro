@@ -1,0 +1,5 @@
+# --- сборка приложения (macOS .app / Windows / Linux) ---
+pyinstaller>=6.6
+# статические бинарники ffmpeg/ffprobe кладутся в бандл сборочным скриптом;
+# если они уже есть в PATH или через static-ffmpeg — spec подхватит их автоматически
+static-ffmpeg>=2.5
