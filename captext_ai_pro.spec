@@ -103,6 +103,11 @@ resolve_icon()
 
 # --------------------------------------------------------------------- datas
 datas = [("app/ui/assets", "app/ui/assets")]        # theme.py ищет SVG рядом с собой
+# Шрифты Inter (это же просит QSS: 'Inter', 'Segoe UI', ...). main.py регистрирует
+# их через QFontDatabase при старте — без файлов в бандле пресеты выглядели бы иначе.
+if os.path.isdir(os.path.join(_SPEC_DIR, "assets", "fonts")):
+    datas.append((os.path.join(_SPEC_DIR, "assets", "fonts"), os.path.join("assets", "fonts")))
+    print("[spec] шрифты Inter в бандле: assets/fonts")
 # AppIcon.png кладём в бандл: main.py ставит его иконкой окна (актуально для
 # Windows/Linux; на macOS иконку окна задаёт система по Info.plist).
 # Мастер-файл живёт в assets/ (его пишет tools/make_app_icon.py), но если

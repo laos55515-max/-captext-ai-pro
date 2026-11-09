@@ -171,6 +171,41 @@ def install_exception_hook(show_dialog: bool = True) -> None:
         pass
 
 
+def load_bundled_fonts() -> int:
+    """Зарегистрировать Inter из assets/fonts (и в dev, и в frozen-бандле).
+
+    QSS первой строкой задаёт `'Inter', ...`; без регистрации семейства Qt
+    молча откатывался на системный шрифт. Возвращает число загруженных начертаний.
+    """
+    try:
+        import glob
+
+        from PySide6.QtGui import QFontDatabase
+    except Exception as exc:                          # pragma: no cover
+        log.debug("QFontDatabase недоступен: %s", exc)
+        return 0
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.path.join(bundle_dir(), "assets", "fonts"),
+                  os.path.join(here, "assets", "fonts")]
+    loaded = 0
+    seen = set()
+    for directory in candidates:
+        if not os.path.isdir(directory):
+            continue
+        for ttf in sorted(glob.glob(os.path.join(directory, "*.ttf"))):
+            if ttf in seen:
+                continue
+            seen.add(ttf)
+            fid = QFontDatabase.addApplicationFont(ttf)
+            if fid == -1:
+                log.warning("шрифт не загрузился: %s", ttf)
+                continue
+            families = QFontDatabase.applicationFontFamilies(fid)
+            log.info("шрифт загружен: %s (%s)", ttf, ", ".join(families) or "?")
+            loaded += 1
+    return loaded
+
+
 def set_window_icon(app) -> None:
     """Иконка окна/таскбара. На macOS её задаёт система (CFBundleIconFile в .app),
     поэтому там вызов безвреден; на Windows/Linux это единственный способ показать
@@ -333,6 +368,12 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("QApplication уже существует — переиспользую существующий экземпляр")
     app.setApplicationName("CapText AI Pro")
     app.setOrganizationName("CapText")
+    load_bundled_fonts()
+    try:
+        from PySide6.QtGui import QFont
+        app.setFont(QFont("Inter", 13))
+    except Exception:                                 # pragma: no cover
+        pass
     set_window_icon(app)
     install_exception_hook(show_dialog=True)
 

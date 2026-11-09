@@ -11,6 +11,10 @@
    «фраза» физически невозможна.
 5. Forced alignment вставленного текста стартует ровно с первой секунды голоса:
    аудио обрезается по `first_vocal_onset`, а тайминги потом сдвигаются обратно.
+6. **HEAD_PADDING_SECONDS = 1.0** — пре-ролл ПЕРЕД первой вспышкой вокала.
+   VAD физически не видит тихую атаку первого слова (fade-in), поэтому аудио
+   для выравнивания режется с запасом ~1 с, а VAD-фильтры расширяются назад
+   с таким же запасом. Именно это чинит кейс «первые 1–2 слова теряются».
 """
 from __future__ import annotations
 
@@ -37,6 +41,10 @@ SR = 16000
 MAX_SEGMENT_SECONDS = 6.0      # жёсткий предел длины одной фразы
 MAX_WORD_SECONDS = 1.6         # ни одно слово не может звучать дольше
 MIN_WORD_SECONDS = 0.06
+HEAD_PADDING_SECONDS = 1.0     # пре-ролл ПЕРЕД первой вспышкой вокала (минимум 0.5–1 с)
+VAD_SPEECH_PAD_MS = 400        # Silero: расширение речевых интервалов, мс
+VAD_MIN_SPEECH_MS = 150        # меньше было → тихий первый слог отбрасывался как шум
+VAD_MIN_SILENCE_MS = 150       # тоньше было → паузы внутри фразы считались концом речи
 
 SONG_PROMPT = (
     "Это текст песни. Куплет, припев, рифмованные строки, повторы и распевы. "
@@ -187,15 +195,23 @@ class VocalSeparator:
 
 
 def _bandpass(x: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarray:
-    """Полосовой фильтр без scipy: разность двух однополюсных ФНЧ (векторизовано)."""
+    """Полосовой фильтр: разность двух однополюсных ФНЧ.
+
+    Быстрый путь — ``scipy.signal.lfilter`` (scipy приходит с librosa),
+    тот же one-pole IIR, но на C. Запасной путь — прежний Python-цикл.
+    """
     def onepole(sig: np.ndarray, cutoff: float) -> np.ndarray:
         a = float(np.exp(-2.0 * np.pi * cutoff / sr))
-        out = np.empty_like(sig)
-        acc = 0.0
-        for i in range(sig.size):
-            acc = a * acc + (1.0 - a) * float(sig[i])
-            out[i] = acc
-        return out
+        try:
+            from scipy.signal import lfilter  # type: ignore
+            return lfilter([1.0 - a], [1.0, -a], sig).astype(np.float32)
+        except Exception:                      # noqa: BLE001 — scipy может отсутствовать
+            out = np.empty_like(sig)
+            acc = 0.0
+            for i in range(sig.size):
+                acc = a * acc + (1.0 - a) * float(sig[i])
+                out[i] = acc
+            return out
     x = x.astype(np.float32)
     return (onepole(x, hi) - onepole(x, lo)).astype(np.float32)
 
@@ -208,25 +224,35 @@ class VoiceActivity:
     method: str = "energy"               # "silero" | "energy"
 
 
-def silero_vad_segments(pcm16k: np.ndarray, threshold: float = 0.35) -> list[tuple[float, float]]:
-    """Речевые интервалы через Silero VAD (torch.hub). Бросает исключение, если недоступен."""
+def silero_vad_segments(pcm16k: np.ndarray, threshold: float = 0.35,
+                        speech_pad_ms: int = VAD_SPEECH_PAD_MS) -> list[tuple[float, float]]:
+    """Речевые интервалы через Silero VAD (torch.hub). Бросает исключение, если недоступен.
+
+    ``speech_pad_ms`` расширяет каждый интервал влево/вправо: тихая атака первого
+    слова (fade-in) снова попадает в речь и не обрезается.
+    """
     import torch  # type: ignore
     model, utils = torch.hub.load("snakers4/silero-vad", "silero_vad",
                                   trust_repo=True, onnx=False, verbose=False)
     get_speech_timestamps = utils[0]
     tensor = torch.from_numpy(np.ascontiguousarray(pcm16k, dtype=np.float32))
     stamps = get_speech_timestamps(tensor, model, sampling_rate=SR, threshold=threshold,
-                                   min_speech_duration_ms=180, min_silence_duration_ms=180)
+                                   min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+                                   min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+                                   speech_pad_ms=int(speech_pad_ms))
     return [(float(s["start"]) / SR, float(s["end"]) / SR) for s in stamps]
 
 
 def energy_vad_segments(pcm16k: np.ndarray, threshold: float = 0.35,
-                        hop: int = 160, min_speech: float = 0.18,
-                        min_silence: float = 0.20) -> list[tuple[float, float]]:
+                        hop: int = 160, min_speech: float = 0.15,
+                        min_silence: float = 0.15,
+                        pad: float = 0.30) -> list[tuple[float, float]]:
     """Надёжный энергетический VAD (без сети и внешних моделей).
 
     Адаптивный порог: шумовой пол считается по 20-му перцентилю RMS изолированного
     вокала, поэтому реверберация «минуса» не принимается за голос.
+    Каждый найденный интервал расширяется на ``pad`` секунд в обе стороны —
+    так тихая атака первого слова не отсекается.
     """
     if pcm16k.size < hop * 4:
         return []
@@ -236,7 +262,7 @@ def energy_vad_segments(pcm16k: np.ndarray, threshold: float = 0.35,
     db = 20.0 * np.log10(rms)
     floor = float(np.percentile(db, 20))
     peak = float(np.percentile(db, 98))
-    if peak - floor < 6.0:                 # сигнала фактически нет
+    if peak - floor < 6.0:                 # сигнала фактически нет (абсолютная тишина)
         return []
     # threshold 0..1 → положение порога между шумовым полом и пиком
     level = floor + (peak - floor) * (0.35 + 0.45 * float(threshold))
@@ -264,6 +290,9 @@ def energy_vad_segments(pcm16k: np.ndarray, threshold: float = 0.35,
         end = len(pcm16k) / SR
         if end - start >= min_speech:
             segments.append((start, end))
+    if pad > 0.0 and segments:             # пре-/пост-ролл: края слова не режем
+        total = len(pcm16k) / SR
+        segments = [(max(0.0, s - pad), min(total, e + pad)) for s, e in segments]
     return segments
 
 
@@ -291,6 +320,23 @@ def first_vocal_onset(vocals_path: str, threshold: float = 0.35) -> float:
     return detect_voice_activity(pcm, threshold).first_onset
 
 
+def head_trim_point(first_onset: float,
+                    head_padding: float = HEAD_PADDING_SECONDS) -> float:
+    """Секунда, С КОТОРОЙ резать аудио для выравнивания.
+
+    Выравнивание всегда отступает НАЗАД от первой VAD-вспышки на ``head_padding``
+    секунд (по умолчанию 1.0 с): VAD не видит тихую атаку первого слова, поэтому
+    резать ровно по detected onset — значит физически отрезать первые 1–2 слова.
+    Возвращает значение ≥ 0.
+    """
+    try:
+        onset = float(first_onset)
+    except (TypeError, ValueError):
+        return 0.0
+    pad = max(0.0, float(head_padding))
+    return max(0.0, onset - pad)
+
+
 # ======================================== 3. ЧИСТКА ТЕКСТА И ТАЙМИНГОВ
 def is_hallucination(text: str) -> bool:
     t = text.strip().strip("«»\"'()[]").lower()
@@ -300,16 +346,21 @@ def is_hallucination(text: str) -> bool:
 
 
 def drop_intro_hallucinations(words: list[Word], first_onset: float,
-                              tolerance: float = 0.35) -> list[Word]:
+                              tolerance: float = 0.35,
+                              head_padding: float = 0.0) -> list[Word]:
     """Убрать всё, что модель «услышала» до первой вспышки вокала.
 
     Ровно это чинит кейс «Песня «Музыка»» длиной 30 секунд поверх вступления:
     такие слова заканчиваются раньше реального вокала и удаляются целиком,
     а первое настоящее слово подтягивается к началу голоса.
+
+    ``head_padding`` расширяет «зону защиты» первых слов назад: слова в пределах
+    [first_onset - head_padding, first_onset) — настоящая тихая атака вокала,
+    а не галлюцинация. По умолчанию 0 — прежнее поведение (обратная совместимость).
     """
     if not words:
         return words
-    limit = max(0.0, first_onset - tolerance)
+    limit = max(0.0, first_onset - max(0.0, head_padding) - tolerance)
     kept: list[Word] = []
     for w in words:
         if w.end <= limit:                       # полностью в интро → выкидываем
@@ -320,12 +371,17 @@ def drop_intro_hallucinations(words: list[Word], first_onset: float,
             w = w.model_copy(update={"start": limit})
         kept.append(w)
     if kept and first_onset > 0:
-        # ЖЁСТКАЯ привязка: первое слово начинается ровно там, где реально начался вокал
+        # ЖЁСТКАЯ привязка: первое слово начинается ровно там, где реально начался вокал.
+        # Только в разумном окне ±0.75 с — иначе при позднем VAD-онсете вся песня
+        # «уезжала» бы на секунду вперёд/назад целиком.
         shift = kept[0].start - first_onset
-        if abs(shift) > 0.06:
+        if 0.06 < abs(shift) <= 0.75:
             for w in kept:
                 w.start = max(0.0, w.start - shift)
                 w.end = max(w.start + MIN_WORD_SECONDS, w.end - shift)
+        elif abs(shift) > 0.75:
+            log.info("head anchor пропущен: сдвиг %.2f с подозрительно велик; "
+                     "доверяю таймингам модели (слова в пре-ролле реальные)", shift)
     return kept
 
 
@@ -376,13 +432,24 @@ def enforce_max_segment(words: list[Word], max_seconds: float = MAX_SEGMENT_SECO
 
 
 def filter_by_vad(words: list[Word], segments: list[tuple[float, float]],
-                  slack: float = 0.25) -> list[Word]:
-    """Оставить только слова, пересекающиеся с речевыми интервалами VAD."""
+                  slack: float = 0.25,
+                  head_padding: float = 0.0) -> list[Word]:
+    """Оставить только слова, пересекающиеся с речевыми интервалами VAD.
+
+    ``head_padding`` расширяет ПЕРВЫЙ речевой интервал назад на указанное число
+    секунд: VAD пропускает тихую атаку первого слова, и без этого расширения
+    первые 1–2 слова удалялись как «не совпадающие с речью».
+    По умолчанию 0 — прежнее поведение.
+    """
     if not segments:
         return words
+    padded = list(segments)
+    if head_padding > 0.0:
+        s0, e0 = padded[0]
+        padded[0] = (max(0.0, s0 - head_padding), e0)
     out: list[Word] = []
     for w in words:
-        for s, e in segments:
+        for s, e in padded:
             if w.end >= s - slack and w.start <= e + slack:
                 out.append(w)
                 break
@@ -415,13 +482,15 @@ class TranscriptionEngine:
 
     def __init__(self, model_size: str = "large-v3", device: str | None = None,
                  compute_type: str | None = None, vad_threshold: float = 0.35,
-                 max_segment_seconds: float = MAX_SEGMENT_SECONDS) -> None:
+                 max_segment_seconds: float = MAX_SEGMENT_SECONDS,
+                 head_padding: float = HEAD_PADDING_SECONDS) -> None:
         dev, comp = pick_device()
         self.model_size = model_size
         self.device = device or dev
         self.compute_type = compute_type or comp
         self.vad_threshold = vad_threshold
         self.max_segment_seconds = max_segment_seconds
+        self.head_padding = max(0.0, float(head_padding))
         self._stable = None
         self._faster = None
 
@@ -479,6 +548,11 @@ class TranscriptionEngine:
         va = detect_voice_activity(pcm, self.vad_threshold)
         log.info("VAD (%s): первая вспышка вокала на %.2f с, интервалов: %d",
                  va.method, va.first_onset, len(va.segments))
+        if not va.segments:
+            # абсолютная тишина / вокал не отделён — предупреждаем, но не падаем:
+            # whisper получит полный трек, а анти-галлюцинации отсекут мусор
+            warns.append("VAD не обнаружил голос в дорожке — возможна абсолютная тишина "
+                         "или слишком тихий вокал. Проверьте галочку «Изолировать вокал».")
 
         if self.stable_ts_available():
             try:
@@ -501,10 +575,16 @@ class TranscriptionEngine:
         return res
 
     def postprocess(self, words: list[Word], va: VoiceActivity) -> list[Word]:
-        """Полная цепочка защиты от «30-секундной галлюцинации» во вступлении."""
+        """Полная цепочка защиты от «30-секундной галлюцинации» во вступлении.
+
+        Тихие первые слова защищены двойным запасом: первым VAD-интервалом
+        отступаем назад на ``self.head_padding`` секунд (по умолчанию 1.0 с),
+        и границу удаления интро-галлюцинаций считаем с тем же отступом.
+        """
         words = [w for w in words if not is_hallucination(w.text)]
-        words = filter_by_vad(words, va.segments)
-        words = drop_intro_hallucinations(words, va.first_onset)
+        words = filter_by_vad(words, va.segments, head_padding=self.head_padding)
+        words = drop_intro_hallucinations(words, va.first_onset,
+                                          head_padding=self.head_padding)
         words = drop_repeat_hallucinations(words)
         words = clamp_word_durations(words)
         words = enforce_max_segment(words, self.max_segment_seconds)
@@ -528,8 +608,8 @@ class TranscriptionEngine:
             initial_prompt=prompt,
             regroup=True,
             suppress_silence=True,
-            condition_on_previous_text=False,
-            no_speech_threshold=0.45,
+            condition_on_previous_text=False,   # анти-зацикливание на музыкальных фразах
+            no_speech_threshold=0.6,            # мягче режем «тишину» — меньше потерь слов
             compression_ratio_threshold=2.2,
             temperature=0.0,
         )
@@ -543,9 +623,11 @@ class TranscriptionEngine:
         model = self._load_faster()
         segments, info = model.transcribe(
             path, language=lang, word_timestamps=True, vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=250, threshold=self.vad_threshold),
+            vad_parameters=dict(min_silence_duration_ms=200, threshold=self.vad_threshold,
+                                speech_pad_ms=VAD_SPEECH_PAD_MS),
             initial_prompt=prompt, beam_size=5, temperature=0.0,
-            condition_on_previous_text=False, no_speech_threshold=0.45,
+            condition_on_previous_text=False,   # анти-зацикливание на музыке
+            no_speech_threshold=0.6,            # меньше пустых отброшенных сегментов
             compression_ratio_threshold=2.2,
         )
         words: list[Word] = []
@@ -567,8 +649,11 @@ class TranscriptionEngine:
                    progress: ProgressCB = None) -> TranscriptionResult:
         """«Свой текст песни»: первое слово жёстко привязывается к первой секунде голоса.
 
-        Музыкальное интро полностью игнорируется: аудио обрезается по первой вспышке
-        вокала, выравнивание идёт по обрезку, после чего тайминги сдвигаются обратно.
+        Музыкальное интро полностью игнорируется, но с защитой от потери слов:
+        аудио обрезается с отступом HEAD_PADDING_SECONDS (по умолчанию 1.0 с) ПЕРЕД
+        первой вспышкой вокала — VAD не видит тихую атаку первого слова, поэтому
+        резать ровно по detected onset раньше значило отрезать первые 1–2 слова.
+        Тайминги потом сдвигаются обратно в систему координат исходного файла.
         """
         def rep(p: float, m: str) -> None:
             if progress:
@@ -582,7 +667,11 @@ class TranscriptionEngine:
         rep(0.05, "VAD: поиск начала вокала…")
         pcm = extract.decode_pcm(vocals_path, sr=SR)
         va = detect_voice_activity(pcm, self.vad_threshold)
-        onset = max(0.0, va.first_onset - 0.08)      # небольшой запас на атаку звука
+        if not va.segments:
+            warns.append("VAD не обнаружил голос — аудио для выравнивания не обрезано, "
+                         "вокала может не быть в дорожке.")
+        # ВАЖНО: запас 1 с ДО первой вспышки (было всего 0.08 с → первые слова обрезались)
+        onset = head_trim_point(va.first_onset, self.head_padding)
         trimmed = pcm[int(onset * SR):]
         if trimmed.size < SR // 2:                   # вокала почти нет — берём всё
             trimmed, onset = pcm, 0.0

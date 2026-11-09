@@ -146,9 +146,12 @@ class VideoExporter:
             s, ms = divmod(ms, 1000)
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+        offset = float(getattr(project, "subtitle_offset", 0.0) or 0.0)
         lines = []
         for i, ph in enumerate(project.phrases, 1):
-            lines.append(f"{i}\n{ts(ph.start)} --> {ts(ph.end)}\n{ph.text}\n")
+            start = max(0.0, ph.start + offset)
+            end = max(start + 0.01, ph.end + offset)
+            lines.append(f"{i}\n{ts(start)} --> {ts(end)}\n{ph.text}\n")
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         return output_path

@@ -8,17 +8,17 @@ version = "1.0.0"
 description = "CapText AI Pro — automatic kinetic subtitles for any audio (rap, phonk, pop, acoustic, podcast)"
 requires-python = ">=3.11"
 dependencies = [
-    "PySide6>=6.6",
-    "pydantic>=2.6",
+    "PySide6>=6.7",
+    "pydantic>=2.7",
     "numpy>=1.26",
-    "librosa>=0.10",
+    "librosa>=0.10.2",
     "av>=12.0",
     "static-ffmpeg>=2.5",
-    "stable-ts>=2.17",
-    "faster-whisper>=1.0",
-    "demucs>=4.0",
-    "torch>=2.2",
-    "torchaudio>=2.2",
+    "stable-ts>=2.17.1",
+    "faster-whisper>=1.0.3",
+    "demucs>=4.0.1",
+    "torch>=2.2.2",
+    "torchaudio>=2.2.2",
 ]
 
 [project.optional-dependencies]

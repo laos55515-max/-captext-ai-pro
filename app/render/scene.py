@@ -74,14 +74,23 @@ class SubtitleScene:
         return layout
 
     # ------------------------------------------------------------- evaluate
-    def visible_phrases(self, t: float) -> list[int]:
+    def _effective_time(self, t: float) -> float:
+        """Медиа-время → время таймлайна с учётом ручной задержки субтитров."""
+        return t - float(getattr(self.project, "subtitle_offset", 0.0) or 0.0)
+
+    def _visible_phrases_timeline(self, t: float) -> list[int]:
+        """``t`` уже в координатах таймлайна (без вычета задержки)."""
         return [i for i, ph in enumerate(self.project.phrases)
                 if ph.words and ph.start - LEAD_IN <= t <= ph.end + TAIL]
 
+    def visible_phrases(self, t: float) -> list[int]:
+        return self._visible_phrases_timeline(self._effective_time(t))
+
     def evaluate(self, t: float) -> list[dict[str, Any]]:
         """Все отрисовываемые элементы с их трансформами в момент ``t``."""
+        t = self._effective_time(t)
         draw: list[dict[str, Any]] = []
-        for idx in self.visible_phrases(t):
+        for idx in self._visible_phrases_timeline(t):
             layout = self.layout_phrase(idx)
             style: Style = layout.style
             decision = getattr(layout, "decision", None)

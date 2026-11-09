@@ -73,9 +73,10 @@ class FasterWhisperBackend(ASRBackend):
             language=None if language in ("auto", "", None) else language,
             word_timestamps=True,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=300),
+            vad_parameters=dict(min_silence_duration_ms=200, speech_pad_ms=400),
             beam_size=5,
-            condition_on_previous_text=False,
+            condition_on_previous_text=False,    # без зацикливания на музыке
+            no_speech_threshold=0.6,             # мягче отбраковываем «тишину»
         )
         words: list[Word] = []
         chunks: list[str] = []

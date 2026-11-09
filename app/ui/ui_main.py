@@ -39,7 +39,7 @@ from app.render.style_presets import (ANIMATION_BY_KEY, ANIMATION_PRESETS, POSIT
                                       STYLE_PRESETS, apply_position, position_key_for,
                                       size_key_for)
 from app.ui.theme import ACCENT, BG_ALT, LINE, MUTED, QSS, TEXT
-from app.ui.widgets import CardGrid, Collapsible, PresetCard, SegmentedControl
+from app.ui.widgets import CardGrid, Collapsible, PresetCard, SegmentedControl, fade_in
 from app.ui.player import VideoPlayer, multimedia_status
 from app.ui.workers import JobRunner
 
@@ -179,7 +179,9 @@ class MainWindow(QMainWindow):
         self.style_grid.set_value("capcut_yellow")
         self.anim_grid.set_value("karaoke")
         self._sync_controls()
+        self._sync_offset_control()
         QTimer.singleShot(200, self._check_environment)
+        QTimer.singleShot(80, self._animate_in)
 
     # ================================================================= LAYOUT
     def _build_ui(self) -> None:
@@ -195,6 +197,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- левая
     def _build_left(self) -> QWidget:
         root = QWidget()
+        self._left_root = root
         v = QVBoxLayout(root)
         v.setContentsMargins(14, 12, 8, 12)
         v.setSpacing(10)
@@ -277,6 +280,8 @@ class MainWindow(QMainWindow):
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
+        self.progress.setMinimumHeight(24)
+        self.progress.setObjectName("StageProgress")
         self.progress.setFormat("%p%  —  готов к работе")
         v.addWidget(self.progress)
 
@@ -294,6 +299,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- правая
     def _build_right(self) -> QWidget:
         root = QWidget()
+        self._right_root = root
         v = QVBoxLayout(root)
         v.setContentsMargins(8, 12, 14, 12)
         v.setSpacing(10)
@@ -351,6 +357,40 @@ class MainWindow(QMainWindow):
         self.btn_recognize.setObjectName("Primary")
         self.btn_recognize.clicked.connect(self.run_recognition)
         v.addWidget(self.btn_recognize)
+
+        # ---- ручная задержка субтитров (Padding) — главный инструмент подгонки тайминга
+        g3 = QGroupBox("⏱ Тайминг субтитров (Padding)")
+        v3 = QVBoxLayout(g3)
+        hint = QLabel("Сдвигает ВСЕ субтитры разом: «+» — позже, «−» — раньше. "
+                      "Подгоняйте по слуху во время проигрывания, шаг 0.05 с.")
+        hint.setWordWrap(True)
+        hint.setObjectName("Muted")
+        v3.addWidget(hint)
+        row = QHBoxLayout()
+        self.sld_delay = QSlider(Qt.Horizontal)
+        self.sld_delay.setRange(-40, 40)           # ±2.00 с, шаг 0.05 с
+        self.sld_delay.setSingleStep(1)
+        self.sld_delay.setPageStep(4)              # 0.20 с по клику на дорожку
+        self.sld_delay.setValue(0)
+        self.sld_delay.setToolTip(
+            "Задержка субтитров относительно исходного тайминга слов.\n"
+            "«+» — субтитры появляются ПОЗЖЕ (если Whisper торопится),\n"
+            "«−» — РАНЬШЕ (если субтитры запаздывают за вокалом).\n"
+            "Применяется к предпросмотру, рендеру и экспорту SRT мгновенно.")
+        self.sld_delay.valueChanged.connect(self._on_offset_changed)
+        self.lbl_delay = QLabel("+0.00 с")
+        self.lbl_delay.setMinimumWidth(56)
+        self.lbl_delay.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_delay.setStyleSheet("font-weight: 800; color: #00E5FF;")
+        self.btn_delay_reset = QPushButton("⟲")
+        self.btn_delay_reset.setFixedWidth(38)
+        self.btn_delay_reset.setToolTip("Сбросить задержку в 0.00 с")
+        self.btn_delay_reset.clicked.connect(lambda: self.sld_delay.setValue(0))
+        row.addWidget(self.sld_delay, 1)
+        row.addWidget(self.lbl_delay)
+        row.addWidget(self.btn_delay_reset)
+        v3.addLayout(row)
+        v.addWidget(g3)
 
         g2 = QGroupBox("Свой текст песни (идеальные тайминги)")
         v2 = QVBoxLayout(g2)
@@ -630,6 +670,36 @@ class MainWindow(QMainWindow):
         self._update_style(backing_enabled=on, backing_color="#000000",
                            backing_opacity=0.6, card_enabled=False)
 
+    # ---------------------------------------------- задержка субтитров (Padding)
+    @staticmethod
+    def _offset_seconds(ticks: int) -> float:
+        """Слайдер хранит тики (шаг 0.05 с)."""
+        return ticks * 0.05
+
+    def _sync_offset_control(self) -> None:
+        """Слайдер/подпись ← project.subtitle_offset (после загрузки проекта)."""
+        if not hasattr(self, "sld_delay"):
+            return
+        off = float(self.project.subtitle_offset)
+        self.sld_delay.blockSignals(True)
+        self.sld_delay.setValue(int(round(off / 0.05)))
+        self.sld_delay.blockSignals(False)
+        self.lbl_delay.setText(f"{off:+.2f} с")
+
+    def _on_offset_changed(self, value: int) -> None:
+        off = self._offset_seconds(value)
+        self.project.subtitle_offset = off
+        self.lbl_delay.setText(f"{off:+.2f} с")
+        self.player.refresh_overlay()
+        t = self.player.position() if hasattr(self, "player") else 0.0
+        self.table.highlight_at_time(t - off)
+        self.statusBar().showMessage(f"Задержка субтитров: {off:+.2f} с")
+
+    def _animate_in(self) -> None:
+        """Плавное появление панелей при старте (каскадом слева направо)."""
+        fade_in(getattr(self, "_left_root", self), 420)
+        QTimer.singleShot(120, lambda: fade_in(getattr(self, "_right_root", self), 500))
+
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("Файл")
         for text, slot, key in (("Открыть медиа…", self.open_media, QKeySequence.Open),
@@ -859,7 +929,7 @@ class MainWindow(QMainWindow):
 
     def seek_seconds(self, t: float) -> None:
         """Клик по строке таблицы → мгновенная перемотка плеера на её начало."""
-        self.player.seek(t)
+        self.player.seek(max(0.0, t + float(self.project.subtitle_offset)))
 
     def _on_seek(self, value: int) -> None:
         dur = self.player.duration() or self.project.duration or 1.0
@@ -878,7 +948,7 @@ class MainWindow(QMainWindow):
             self.seekbar.setValue(int(1000 * min(1.0, t / dur)))
             self.seekbar.blockSignals(False)
         self.lbl_time.setText(f"{_fmt(t)} / {_fmt(dur)}")
-        self.table.highlight_at_time(t)
+        self.table.highlight_at_time(t - float(self.project.subtitle_offset))
         self._maybe_update_contrast()
 
     # ============================================================== ПАЙПЛАЙН
@@ -940,6 +1010,8 @@ class MainWindow(QMainWindow):
         self.player.set_scene(self.scene)
         self.table.load(project)
         self._sync_controls()
+        self._sync_offset_control()
+        fade_in(self.table, 450)
 
         report = getattr(self._pending_processor, "report", None)
         self._last_report = report
@@ -951,6 +1023,8 @@ class MainWindow(QMainWindow):
             self.lbl_debug.setText(
                 f"ASR: {report.engine} · язык: {report.language} · вокал: {report.separation}\n"
                 f"Слов: {report.n_words} · блоков: {report.n_phrases}\n"
+                f"Старт вокала: {report.first_onset:.1f} с · VAD: {report.vad_method} "
+                f"(пре-ролл 1.0 с)\n"
                 f"BPM {p.bpm:.0f} · онсетов {len(p.onsets)} · kick {len(p.kick_events)} · "
                 f"слов/с {p.words_per_sec:.2f}\nЖанр: {probs}" if p else "")
             for w in report.warnings:
@@ -964,8 +1038,12 @@ class MainWindow(QMainWindow):
 
     @Slot(float, str)
     def _on_progress(self, p: float, msg: str) -> None:
+        p = max(0.0, min(1.0, float(p)))
         self.progress.setValue(int(p * 100))
-        self.progress.setFormat(f"%p%  —  {msg}")
+        if p >= 1.0:
+            self.progress.setFormat("100%  —  готово")
+        else:
+            self.progress.setFormat(f"%p%  —  {msg}")
         self.statusBar().showMessage(msg)
 
     @Slot(str)
@@ -1041,6 +1119,7 @@ class MainWindow(QMainWindow):
         if self.project.video_path and os.path.exists(self.project.video_path):
             self.load_media(self.project.video_path)
         self._sync_controls()
+        self._sync_offset_control()
 
     def export_video(self) -> None:
         if not self.project.phrases:
