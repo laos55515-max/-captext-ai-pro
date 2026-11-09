@@ -217,3 +217,34 @@ class CardGrid(QWidget):
             if card._selected:
                 return k
         return None
+
+
+# --------------------------------------------------------------- animations
+def fade_in(widget: QWidget, duration: int = 420, start_opacity: float = 0.0) -> None:
+    """Плавно проявить виджет (opacity 0 → 1) через QGraphicsOpacityEffect.
+
+    Пассивная, неблокирующая анимация: виджет остаётся интерактивным, эффект
+    снимается после завершения (нулевая цена на кадрах после анимации).
+    """
+    from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(max(0.0, min(1.0, start_opacity)))
+    widget.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", widget)
+    anim.setDuration(max(1, int(duration)))
+    anim.setStartValue(effect.opacity())
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def _cleanup() -> None:
+        # снимаем эффект целиком — не оставляем композитинг на каждый кадр
+        widget.setGraphicsEffect(None)
+
+    anim.finished.connect(_cleanup)
+    # сохраняем ссылку, чтобы GC не оборвал анимацию
+    anim.setParent(widget)
+    effect.setParent(widget)
+    anim.start()
+

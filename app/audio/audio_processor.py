@@ -15,12 +15,12 @@ from app.audio import extract
 from app.audio.asr_align import MMSForcedAligner, attach_kicks, mark_keywords, snap_to_onsets
 from app.audio.classify import UniversalAudioClassifier
 from app.audio.segment import PhraseSegmenter
-from app.core.asr_engine import (MAX_SEGMENT_SECONDS, SONG_PROMPT, SPEECH_PROMPT,
-                                 SeparationResult, TranscriptionEngine, TranscriptionResult,
-                                 VocalSeparator, clean_lyrics, detect_voice_activity,
-                                 drop_repeat_hallucinations, enforce_max_segment,
-                                 first_vocal_onset, is_hallucination, pick_device,
-                                 torch_device)
+from app.core.asr_engine import (HEAD_PADDING_SECONDS, MAX_SEGMENT_SECONDS, SONG_PROMPT,
+                                 SPEECH_PROMPT, SeparationResult, TranscriptionEngine,
+                                 TranscriptionResult, VocalSeparator, clean_lyrics,
+                                 detect_voice_activity, drop_repeat_hallucinations,
+                                 enforce_max_segment, first_vocal_onset, is_hallucination,
+                                 pick_device, torch_device)
 from app.core.models import AudioProfile, Project
 from app.render.presets import AutoStyleEngine
 
@@ -50,6 +50,9 @@ class ProcessOptions:
     snap_tolerance: float = 0.04
     vad_threshold: float = 0.35
     max_segment_seconds: float = MAX_SEGMENT_SECONDS
+    # пре-ролл ПЕРЕД первой вспышкой вокала: минимум 0.5–1 с, иначе VAD
+    # отбрасывает тихую атаку первого слова и первые 1–2 слова теряются
+    head_padding: float = HEAD_PADDING_SECONDS
 
 
 @dataclass
@@ -70,7 +73,8 @@ class AudioProcessor:
         self.separator = VocalSeparator()
         self.engine = TranscriptionEngine(self.opt.model_size,
                                           vad_threshold=self.opt.vad_threshold,
-                                          max_segment_seconds=self.opt.max_segment_seconds)
+                                          max_segment_seconds=self.opt.max_segment_seconds,
+                                          head_padding=self.opt.head_padding)
         self.classifier = UniversalAudioClassifier()
         self.segmenter = PhraseSegmenter()
         self.report = ProcessReport()

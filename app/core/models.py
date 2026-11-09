@@ -249,6 +249,9 @@ class Project(BaseModel):
     audio_profile: Optional[AudioProfile] = None
     phrases: list[Phrase] = Field(default_factory=list)
     global_style: Style = Style()
+    # Ручная задержка субтитров (секунды): «+» — субтитры позже, «−» — раньше.
+    # Применяется при рендере, предпросмотре, в таблице и в экспорте SRT — не разрушает тайминги слов.
+    subtitle_offset: float = Field(default=0.0, ge=-5.0, le=5.0)
 
     # ---- io ----
     def save(self, path: str | Path) -> None:
